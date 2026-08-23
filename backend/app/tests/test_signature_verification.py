@@ -6,8 +6,8 @@ from cryptography.exceptions import InvalidSignature
 # Ensure backend directory is in the python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from app.core.keystore import get_issuer_signing_key, get_issuer_verification_key
-from app.api.routes.issuer import _sign_commitment
+from app.core.issuer_crypto import sign_commitment
+from app.core.keystore import get_issuer_signing_key, get_issuer_verification_key, is_issuer_key_active
 
 def test_ed25519_signature_and_tampering():
     issuer_id = "test_issuer_123"
@@ -17,7 +17,7 @@ def test_ed25519_signature_and_tampering():
     original_commitment = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     
     # Generate signature
-    signature_hex = _sign_commitment(original_commitment, issuer_id)
+    signature_hex = sign_commitment(original_commitment, issuer_id)
     print(f"\n[Signature Test] Real Ed25519 signature: {signature_hex}")
     print(f"[Signature Test] Length of Ed25519 signature hex (should be 128): {len(signature_hex)}")
     

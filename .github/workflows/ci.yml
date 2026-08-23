@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr libgl1
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+      - name: Run tests
+        env:
+          JWT_SECRET_KEY: ci-jwt-secret-must-be-at-least-sixty-four-characters-long-ok
+          FIELD_ENCRYPTION_KEY: ci-field-encryption-key-32bytes!!
+          DATABASE_URL: mongodb://localhost:27017/did_platform
+          REDIS_URL: redis://localhost:6379/0
+        run: pytest app/tests/ -q
+
+  contracts:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - run: npx hardhat test

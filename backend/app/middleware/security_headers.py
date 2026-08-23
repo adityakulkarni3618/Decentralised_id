@@ -12,6 +12,14 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+# Session-establishment routes must not require a prior CSRF token (e.g. switching accounts).
+CSRF_EXEMPT_PATHS = {
+    "/api/auth/login",
+    "/api/auth/register",
+    "/api/auth/verify-otp",
+    "/api/auth/refresh",
+    "/api/auth/logout",
+}
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -34,7 +42,7 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        if request.method not in SAFE_METHODS:
+        if request.method not in SAFE_METHODS and request.url.path not in CSRF_EXEMPT_PATHS:
             access_cookie = request.cookies.get("access_token")
             if access_cookie:
                 cookie_token = request.cookies.get("csrf_token")

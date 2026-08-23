@@ -16,6 +16,7 @@ interface IssuerCredentialOut {
   status: string;
   issued_at: string;
   expires_at: string | null;
+  blockchain_tx_hash: string | null;
 }
 
 interface DashboardStats {
@@ -94,6 +95,29 @@ function IssuerDashboardContent() {
     if (!reason) return;
     try {
       await apiClient.post("/issuer/revoke", { credential_id: credentialId, reason });
+      loadAll();
+    } catch (err) {
+      setError(extractErrorMessage(err));
+    }
+  }
+
+  async function handleAnchor(credentialId: string) {
+    setError(null);
+    setSuccess(null);
+    try {
+      const { data } = await apiClient.post("/blockchain/anchor-credential", { credential_id: credentialId });
+      setSuccess(`Anchored on-chain: ${data.tx_hash}`);
+      loadAll();
+    } catch (err) {
+      setError(extractErrorMessage(err));
+    }
+  }
+
+  async function handleAnchorRevocation(credentialId: string) {
+    setError(null);
+    try {
+      const { data } = await apiClient.post("/blockchain/anchor-revocation", { credential_id: credentialId });
+      setSuccess(`Revocation anchored: ${data.tx_hash}`);
       loadAll();
     } catch (err) {
       setError(extractErrorMessage(err));
@@ -245,6 +269,7 @@ function IssuerDashboardContent() {
                     <th className="pb-2">Type</th>
                     <th className="pb-2">Status</th>
                     <th className="pb-2">Issued</th>
+                    <th className="pb-2">On-chain</th>
                     <th className="pb-2"></th>
                   </tr>
                 </thead>
@@ -257,18 +282,33 @@ function IssuerDashboardContent() {
                         <StatusBadge status={c.status} />
                       </td>
                       <td className="py-3 text-gray-500">{new Date(c.issued_at).toLocaleDateString()}</td>
+                      <td className="py-3 font-mono text-xs text-gray-400">
+                        {c.blockchain_tx_hash ? `${c.blockchain_tx_hash.slice(0, 10)}…` : "—"}
+                      </td>
                       <td className="py-3">
-                        {c.status === "active" && (
-                          <button onClick={() => handleRevoke(c.id)} className="text-xs text-red-500 font-medium">
-                            Revoke
-                          </button>
-                        )}
+                        <div className="flex gap-2 flex-wrap">
+                          {c.status === "active" && !c.blockchain_tx_hash && (
+                            <button onClick={() => handleAnchor(c.id)} className="text-xs text-brand-600 font-medium">
+                              Anchor
+                            </button>
+                          )}
+                          {c.status === "active" && (
+                            <button onClick={() => handleRevoke(c.id)} className="text-xs text-red-500 font-medium">
+                              Revoke
+                            </button>
+                          )}
+                          {c.status === "revoked" && (
+                            <button onClick={() => handleAnchorRevocation(c.id)} className="text-xs text-brand-600 font-medium">
+                              Anchor revocation
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
                   {filteredIssued.length === 0 && (
                     <tr>
-                      <td colSpan={5} className="py-6 text-center text-gray-400">
+                      <td colSpan={6} className="py-6 text-center text-gray-400">
                         No credentials found.
                       </td>
                     </tr>

@@ -34,6 +34,7 @@ class IssuerCredentialOut(BaseModel):
     issued_at: datetime
     expires_at: datetime | None
     revoked_at: datetime | None
+    blockchain_tx_hash: str | None = None
 
     class Config:
         from_attributes = True

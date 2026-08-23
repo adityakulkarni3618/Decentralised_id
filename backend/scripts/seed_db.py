@@ -1,10 +1,13 @@
 """
 Seeds the database with demo users, an approved issuer, sample
 credentials, and a verification log entry — so the platform is
-immediately explorable after `docker-compose up --build`.
+immediately explorable after startup.
 
 Run with:  python -m scripts.seed_db
+           python -m scripts.seed_db --force   # wipe demo data and re-seed
+           python -m scripts.seed_db --resync  # re-sign credentials with current keys
 """
+import argparse
 import hashlib
 import secrets
 import sys
@@ -17,6 +20,7 @@ from app.db.init_db import init_db
 from app.db.session import SessionLocal
 from app.core.security import encrypt_field, hash_password
 from app.core.rbac import Role
+from app.core.issuer_crypto import ensure_issuer_public_key, resync_issuer_credentials, sign_commitment
 from app.models.user import User, IssuerProfile
 from app.models.did import DIDProfile
 from app.models.credential import Credential, CredentialClaim, CredentialStatus, CredentialType
@@ -24,6 +28,14 @@ from app.models.consent import ConsentRecord, ConsentStatus
 from app.models.audit import VerificationLog
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
+
+DEMO_EMAILS = {
+    "admin@decentraid.dev",
+    "issuer@university.edu",
+    "verifier@bar-nightclub.com",
+    "alice@example.com",
+    "bob@example.com",
+}
 
 
 def make_did_profile(db, user_id):
@@ -62,9 +74,8 @@ def issue_demo_credential(db, holder, issuer, credential_type, claims, days_vali
         claim_rows.append((key, value, salt, commitment))
 
     overall_commitment = hashlib.sha256("|".join(claim_commitments).encode()).hexdigest()
-    from app.core.keystore import get_issuer_signing_key
-    private_key = get_issuer_signing_key(str(issuer.id))
-    signature = private_key.sign(bytes.fromhex(overall_commitment)).hex()
+    ensure_issuer_public_key(db, str(issuer.id))
+    signature = sign_commitment(overall_commitment, str(issuer.id), db)
 
     credential = Credential(
         id=uuid.uuid4(), holder_id=holder.id, issuer_id=issuer.id, credential_type=credential_type,
@@ -83,13 +94,41 @@ def issue_demo_credential(db, holder, issuer, credential_type, claims, days_vali
     return credential
 
 
-def run():
+def wipe_demo_data(db):
+    for email in DEMO_EMAILS:
+        user = db.query(User).filter(User.email == email).first()
+        if user:
+            db.delete(user)
+    db.commit()
+
+
+def resync_all_issuer_signatures(db):
+    issuers = db.query(User).filter(User.role == Role.ISSUER).all()
+    total = 0
+    for issuer in issuers:
+        total += resync_issuer_credentials(db, str(issuer.id))
+    db.commit()
+    return total
+
+
+def run(force: bool = False, resync: bool = False):
     init_db()
     db = SessionLocal()
     try:
-        if db.query(User).filter(User.email == "admin@decentraid.dev").first():
-            print("Seed data already present — skipping.")
+        if resync:
+            updated = resync_all_issuer_signatures(db)
+            print(f"Re-signed {updated} credential(s) with current issuer keys.")
             return
+
+        existing = db.query(User).filter(User.email == "admin@decentraid.dev").first()
+        if existing and not force:
+            updated = resync_all_issuer_signatures(db)
+            print(f"Seed data already present — re-synced {updated} credential signature(s).")
+            return
+
+        if force and existing:
+            wipe_demo_data(db)
+            print("Cleared existing demo data.")
 
         admin = make_user(db, "admin@decentraid.dev", "AdminPass!2024", Role.ADMIN, "Platform Admin")
 
@@ -99,6 +138,8 @@ def run():
             organization_domain="university.edu", is_approved=True,
         )
         db.add(issuer_profile)
+        db.flush()
+        ensure_issuer_public_key(db, str(issuer_user.id))
 
         verifier_user = make_user(db, "verifier@bar-nightclub.com", "VerifierPass!2024", Role.VERIFIER, "Downtown Nightclub")
 
@@ -145,4 +186,8 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser(description="Seed DecentraID demo database")
+    parser.add_argument("--force", action="store_true", help="Wipe and re-create demo data")
+    parser.add_argument("--resync", action="store_true", help="Re-sign credentials with current issuer keys")
+    args = parser.parse_args()
+    run(force=args.force, resync=args.resync)

@@ -4,26 +4,10 @@ Prove sensitive claims — age, student status, employment, KYC validity — wit
 raw personal data. Combines decentralized identity (DIDs), AI-based fraud detection,
 zero-knowledge proofs, granular consent management, and a tamper-evident audit trail.
 
-> **Read this before you demo it.** This is a hackathon-grade reference implementation, not
-> an audited production system. Two things in particular are deliberately built as
-> from-scratch reference implementations rather than wrapping a heavier third-party toolchain,
-> because this environment has no package-registry/network access:
->
-> 1. **The ZK proof engine** (`backend/app/services/zk/proof_engine.py`) is a real,
->    working, tested Sigma-protocol (Pedersen commitments + Fiat-Shamir OR-proof), not a
->    Circom/snarkjs circuit. It has genuine zero-knowledge properties for the boolean
->    predicates this app needs (`age_gte_18`, `is_student_eq_true`, etc.). Swapping in a
->    compiled SNARK circuit later only requires reimplementing `generate_proof()` /
->    `verify_proof()` — no caller changes.
-> 2. **The AI pipeline** (`backend/app/services/ai/`) uses classical OpenCV/Tesseract
->    techniques (noise-variance/edge/copy-move tamper heuristics, HOG-based face similarity,
->    multi-frame liveness heuristics) instead of downloaded deep-learning model weights.
->    Swap `_extract_embedding()` and `analyze_document()` for real model inference behind
->    the same function signatures for production use.
->
-> Before any real deployment: get an independent security audit (especially of the smart
-> contracts and the ZK engine), replace the HMAC-based issuer "signature" placeholder with
-> real Ed25519/ECDSA signing backed by a KMS/HSM, and move JWTs to httpOnly cookies.
+> **Read this before you demo it.** This is a production-oriented reference implementation.
+> For live deployment you still need an independent security audit (especially smart contracts
+> and the ZK engine), KMS/HSM-backed issuer keys, and optional upgrades to SNARK circuits
+> and deep-learning AI models. The core flows below are fully functional end-to-end.
 
 ---
 
@@ -38,9 +22,10 @@ decentra-id/
 └── .env.example
 ```
 
-**Backend**: JWT auth with TOTP-based MFA and account lockout, AES-256-GCM field encryption,
-RBAC with per-object ownership checks (IDOR prevention), Redis-backed rate limiting on every
-auth/AI/verification endpoint, and a hash-chained tamper-evident audit log.
+**Backend**: JWT auth in httpOnly cookies with CSRF protection, TOTP MFA enrollment,
+Ed25519 issuer signatures (public keys stored in DB), AES-256-GCM field encryption,
+RBAC with per-object ownership checks (IDOR prevention), Redis-backed rate limiting
+and OTP challenges, and a hash-chained tamper-evident audit log.
 
 **AI pipeline**: OCR text extraction + multi-signal document tamper detection, face-match
 similarity scoring, multi-frame liveness heuristics, and a weighted fraud-risk aggregator
@@ -63,7 +48,7 @@ consent modals, and status badges.
 
 ### 1. Prerequisites
 - Docker and Docker Compose installed
-- Ports `3000`, `8000`, `5432`, `6379`, `8545` free
+- Ports `3000`, `8000`, `27017`, `6379`, `8545` free
 
 ### 2. Configure environment
 ```bash
@@ -77,7 +62,7 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"   # -> FIELD_ENCRY
 ```bash
 docker-compose up --build
 ```
-This brings up Postgres, Redis, a local Hardhat blockchain node, the FastAPI backend, and the
+This brings up MongoDB, Redis, a local Hardhat blockchain node, the FastAPI backend, and the
 Next.js frontend.
 
 ### 4. Deploy the smart contracts (first run only)
@@ -93,8 +78,9 @@ docker-compose restart backend
 
 ### 5. Initialize and seed the database
 ```bash
-docker-compose exec backend python -m scripts.seed_db
+docker-compose exec backend python -m scripts.seed_db --force
 ```
+Use `--resync` instead to re-sign credentials if issuer keys changed without wiping data.
 This creates the schema and seeds demo accounts:
 
 | Role     | Email                       | Password           | Notes                                     |

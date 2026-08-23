@@ -89,17 +89,12 @@ def generate_wallet_proof(
     raw_value = decrypt_field(claim.value_encrypted)
 
     # Verify the issuer's signature on the credential
-    from app.core.keystore import get_issuer_verification_key
-    try:
-        pub_key = get_issuer_verification_key(credential.issuer_id)
-        pub_key.verify(
-            bytes.fromhex(credential.issuer_signature),
-            bytes.fromhex(credential.claims_commitment)
-        )
-    except Exception:
+    from app.core.issuer_crypto import verify_credential_signature
+
+    if not verify_credential_signature(credential, db):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Credential has an invalid or tampered issuer signature."
+            detail="Credential has an invalid or tampered issuer signature.",
         )
 
     try:

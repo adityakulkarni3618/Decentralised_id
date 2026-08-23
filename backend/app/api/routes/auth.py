@@ -6,12 +6,16 @@ import pyotp
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
+from app.api.deps import Principal, get_current_principal
+from app.core.auth_cookies import clear_auth_cookies, set_auth_cookies
 from app.core.config import settings
+from app.core.otp_store import delete_otp_challenge, get_otp_challenge, store_otp_challenge
 from app.core.rate_limit import limiter
 from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
+    decrypt_field,
     encrypt_field,
     hash_password,
     verify_password,
@@ -23,6 +27,9 @@ from app.schemas.auth import (
     LoginRequest,
     LoginResponse,
     LogoutRequest,
+    MeResponse,
+    MfaEnableRequest,
+    MfaSetupResponse,
     RefreshRequest,
     RegisterRequest,
     RegisterResponse,
@@ -35,10 +42,6 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_MINUTES = 15
-
-# In-memory OTP challenge store keyed by challenge token. In production
-# this belongs in Redis with a TTL matching OTP_CHALLENGE_TTL.
-_otp_challenges: dict[str, dict] = {}
 OTP_CHALLENGE_TTL_SECONDS = 300
 
 
@@ -46,12 +49,27 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+@router.get("/me", response_model=MeResponse)
+def get_me(
+    principal: Principal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.id == principal.user_id).first()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account not found.")
+    return MeResponse(
+        user_id=user.id,
+        email=user.email,
+        role=user.role,
+        mfa_enabled=user.mfa_enabled,
+    )
+
+
 @router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
 @limiter.limit(settings.RATE_LIMIT_AUTH)
 def register(request: Request, payload: RegisterRequest, db: Session = Depends(get_db)):
     existing = db.query(User).filter(User.email == payload.email).first()
     if existing:
-        # Generic message — never reveal whether an email is registered.
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Registration could not be completed.")
 
     user = User(
@@ -76,9 +94,6 @@ def register(request: Request, payload: RegisterRequest, db: Session = Depends(g
             )
         )
 
-    # Every new user gets a DID with a server-generated keypair for MVP
-    # simplicity. In a fuller implementation the client generates the
-    # keypair locally and only the public key is ever sent to the server.
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives import serialization
 
@@ -121,7 +136,7 @@ def login(request: Request, response: Response, payload: LoginRequest, db: Sessi
     if user.locked_until and user.locked_until > datetime.now(timezone.utc):
         raise HTTPException(
             status_code=status.HTTP_423_LOCKED,
-            detail=f"Account temporarily locked due to repeated failed attempts. Try again later.",
+            detail="Account temporarily locked due to repeated failed attempts. Try again later.",
         )
 
     if not verify_password(payload.password, user.hashed_password):
@@ -144,10 +159,7 @@ def login(request: Request, response: Response, payload: LoginRequest, db: Sessi
 
     if user.mfa_enabled:
         challenge_token = secrets.token_urlsafe(32)
-        _otp_challenges[challenge_token] = {
-            "user_id": str(user.id),
-            "expires_at": datetime.now(timezone.utc) + timedelta(seconds=OTP_CHALLENGE_TTL_SECONDS),
-        }
+        store_otp_challenge(challenge_token, str(user.id), OTP_CHALLENGE_TTL_SECONDS)
         log_event(
             db, actor_id=str(user.id), action="user.login_otp_challenge", resource_type="user",
             resource_id=str(user.id), ip_address=_client_ip(request),
@@ -162,31 +174,7 @@ def login(request: Request, response: Response, payload: LoginRequest, db: Sessi
     )
     db.commit()
 
-    csrf_token = secrets.token_hex(32)
-    response.set_cookie(
-        key="access_token",
-        value=access_token,
-        httponly=True,
-        secure=settings.ENVIRONMENT == "production",
-        samesite="lax",
-        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-    )
-    response.set_cookie(
-        key="refresh_token",
-        value=refresh_token,
-        httponly=True,
-        secure=settings.ENVIRONMENT == "production",
-        samesite="lax",
-        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600,
-    )
-    response.set_cookie(
-        key="csrf_token",
-        value=csrf_token,
-        httponly=False,  # Accessible by frontend JS
-        secure=settings.ENVIRONMENT == "production",
-        samesite="lax",
-        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-    )
+    set_auth_cookies(response, access_token, refresh_token)
 
     return LoginResponse(
         otp_required=False,
@@ -199,22 +187,19 @@ def login(request: Request, response: Response, payload: LoginRequest, db: Sessi
 @router.post("/verify-otp", response_model=TokenResponse)
 @limiter.limit(settings.RATE_LIMIT_AUTH)
 def verify_otp(request: Request, response: Response, payload: VerifyOtpRequest, db: Session = Depends(get_db)):
-    challenge = _otp_challenges.get(payload.otp_challenge_token)
-    if not challenge or challenge["expires_at"] < datetime.now(timezone.utc):
-        _otp_challenges.pop(payload.otp_challenge_token, None)
+    challenge = get_otp_challenge(payload.otp_challenge_token)
+    if not challenge:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="OTP challenge expired or invalid.")
 
     user = db.query(User).filter(User.id == challenge["user_id"]).first()
     if user is None or not user.mfa_secret_encrypted:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="MFA is not configured for this account.")
 
-    from app.core.security import decrypt_field
-
     totp = pyotp.TOTP(decrypt_field(user.mfa_secret_encrypted))
     if not totp.verify(payload.otp_code, valid_window=settings.OTP_VALID_WINDOW):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid one-time passcode.")
 
-    _otp_challenges.pop(payload.otp_challenge_token, None)
+    delete_otp_challenge(payload.otp_challenge_token)
 
     access_token = create_access_token(subject=str(user.id), role=user.role)
     refresh_token = create_refresh_token(subject=str(user.id))
@@ -225,31 +210,7 @@ def verify_otp(request: Request, response: Response, payload: VerifyOtpRequest, 
     )
     db.commit()
 
-    csrf_token = secrets.token_hex(32)
-    response.set_cookie(
-        key="access_token",
-        value=access_token,
-        httponly=True,
-        secure=settings.ENVIRONMENT == "production",
-        samesite="lax",
-        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-    )
-    response.set_cookie(
-        key="refresh_token",
-        value=refresh_token,
-        httponly=True,
-        secure=settings.ENVIRONMENT == "production",
-        samesite="lax",
-        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600,
-    )
-    response.set_cookie(
-        key="csrf_token",
-        value=csrf_token,
-        httponly=False,
-        secure=settings.ENVIRONMENT == "production",
-        samesite="lax",
-        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-    )
+    set_auth_cookies(response, access_token, refresh_token)
 
     return TokenResponse(
         expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
@@ -259,10 +220,65 @@ def verify_otp(request: Request, response: Response, payload: VerifyOtpRequest, 
     )
 
 
+@router.post("/mfa/setup", response_model=MfaSetupResponse)
+@limiter.limit(settings.RATE_LIMIT_AUTH)
+def setup_mfa(
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.id == principal.user_id).first()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+    if user.mfa_enabled:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MFA is already enabled.")
+
+    secret = pyotp.random_base32()
+    user.mfa_secret_encrypted = encrypt_field(secret)
+    user.mfa_enabled = False
+    db.commit()
+
+    totp = pyotp.TOTP(secret)
+    provisioning_uri = totp.provisioning_uri(name=user.email, issuer_name=settings.OTP_ISSUER_NAME)
+
+    log_event(
+        db, actor_id=principal.user_id, action="user.mfa_setup_initiated", resource_type="user",
+        resource_id=principal.user_id, ip_address=_client_ip(request),
+    )
+
+    return MfaSetupResponse(provisioning_uri=provisioning_uri, manual_entry_key=secret)
+
+
+@router.post("/mfa/enable", response_model=MeResponse)
+@limiter.limit(settings.RATE_LIMIT_AUTH)
+def enable_mfa(
+    request: Request,
+    payload: MfaEnableRequest,
+    principal: Principal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.id == principal.user_id).first()
+    if user is None or not user.mfa_secret_encrypted:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Run MFA setup first.")
+
+    totp = pyotp.TOTP(decrypt_field(user.mfa_secret_encrypted))
+    if not totp.verify(payload.otp_code, valid_window=settings.OTP_VALID_WINDOW):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid one-time passcode.")
+
+    user.mfa_enabled = True
+    log_event(
+        db, actor_id=principal.user_id, action="user.mfa_enabled", resource_type="user",
+        resource_id=principal.user_id, ip_address=_client_ip(request),
+    )
+    db.commit()
+
+    return MeResponse(user_id=user.id, email=user.email, role=user.role, mfa_enabled=True)
+
+
 @router.post("/refresh", response_model=TokenResponse)
 @limiter.limit(settings.RATE_LIMIT_AUTH)
-def refresh(request: Request, response: Response, payload: RefreshRequest, db: Session = Depends(get_db)):
-    ref_token = payload.refresh_token or request.cookies.get("refresh_token")
+def refresh(request: Request, response: Response, payload: RefreshRequest = None, db: Session = Depends(get_db)):
+    ref_token = (payload.refresh_token if payload else None) or request.cookies.get("refresh_token")
     if not ref_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing refresh token.")
     try:
@@ -279,32 +295,7 @@ def refresh(request: Request, response: Response, payload: RefreshRequest, db: S
 
     access_token = create_access_token(subject=str(user.id), role=user.role)
     new_refresh_token = create_refresh_token(subject=str(user.id))
-
-    csrf_token = secrets.token_hex(32)
-    response.set_cookie(
-        key="access_token",
-        value=access_token,
-        httponly=True,
-        secure=settings.ENVIRONMENT == "production",
-        samesite="lax",
-        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-    )
-    response.set_cookie(
-        key="refresh_token",
-        value=new_refresh_token,
-        httponly=True,
-        secure=settings.ENVIRONMENT == "production",
-        samesite="lax",
-        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600,
-    )
-    response.set_cookie(
-        key="csrf_token",
-        value=csrf_token,
-        httponly=False,
-        secure=settings.ENVIRONMENT == "production",
-        samesite="lax",
-        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-    )
+    set_auth_cookies(response, access_token, new_refresh_token)
 
     return TokenResponse(
         expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
@@ -315,9 +306,6 @@ def refresh(request: Request, response: Response, payload: RefreshRequest, db: S
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-def logout(request: Request, response: Response, payload: LogoutRequest = None, db: Session = Depends(get_db)):
-    # Clear cookies
-    response.delete_cookie("access_token")
-    response.delete_cookie("refresh_token")
-    response.delete_cookie("csrf_token")
+def logout(response: Response):
+    clear_auth_cookies(response)
     return None

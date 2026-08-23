@@ -78,3 +78,19 @@ class RefreshRequest(BaseModel):
 
 class LogoutRequest(BaseModel):
     refresh_token: str | None = None
+
+
+class MeResponse(BaseModel):
+    user_id: uuid.UUID
+    email: EmailStr
+    role: Role
+    mfa_enabled: bool
+
+
+class MfaSetupResponse(BaseModel):
+    provisioning_uri: str
+    manual_entry_key: str
+
+
+class MfaEnableRequest(BaseModel):
+    otp_code: str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")

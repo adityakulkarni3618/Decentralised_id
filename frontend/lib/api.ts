@@ -1,21 +1,6 @@
-import axios, { AxiosInstance, AxiosError } from "axios";
+import axios, { AxiosError, AxiosInstance, InternalAxiosRequestConfig } from "axios";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
-
-function getStoredToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return window.sessionStorage.getItem("access_token");
-}
-
-export function setStoredTokens(accessToken: string, refreshToken: string) {
-  window.sessionStorage.setItem("access_token", accessToken);
-  window.sessionStorage.setItem("refresh_token", refreshToken);
-}
-
-export function clearStoredTokens() {
-  window.sessionStorage.removeItem("access_token");
-  window.sessionStorage.removeItem("refresh_token");
-}
 
 function getCookie(name: string): string | null {
   if (typeof document === "undefined") return null;
@@ -27,11 +12,11 @@ function getCookie(name: string): string | null {
 
 export const apiClient: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 20000,
+  timeout: 60000,
   withCredentials: true,
 });
 
-apiClient.interceptors.request.use((config) => {
+apiClient.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   const csrfToken = getCookie("csrf_token");
   if (csrfToken) {
     config.headers["X-CSRF-Token"] = csrfToken;
@@ -39,13 +24,39 @@ apiClient.interceptors.request.use((config) => {
   return config;
 });
 
+let refreshPromise: Promise<void> | null = null;
+
+async function tryRefreshSession(): Promise<void> {
+  if (!refreshPromise) {
+    refreshPromise = apiClient
+      .post("/auth/refresh", {})
+      .then(() => undefined)
+      .finally(() => {
+        refreshPromise = null;
+      });
+  }
+  await refreshPromise;
+}
+
 apiClient.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
-    if (error.response?.status === 401) {
-      clearStoredTokens();
-      if (typeof window !== "undefined" && window.location.pathname !== "/login") {
-        window.location.href = "/login";
+    const original = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
+    if (
+      error.response?.status === 401 &&
+      original &&
+      !original._retry &&
+      !original.url?.includes("/auth/login") &&
+      !original.url?.includes("/auth/refresh")
+    ) {
+      original._retry = true;
+      try {
+        await tryRefreshSession();
+        return apiClient(original);
+      } catch {
+        if (typeof window !== "undefined" && window.location.pathname !== "/login") {
+          window.location.href = "/login";
+        }
       }
     }
     return Promise.reject(error);
@@ -60,4 +71,10 @@ export function extractErrorMessage(error: unknown): string {
     return error.message;
   }
   return "An unexpected error occurred.";
+}
+
+export async function uploadFormData(url: string, formData: FormData) {
+  return apiClient.post(url, formData, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
 }

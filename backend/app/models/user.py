@@ -47,6 +47,7 @@ class IssuerProfile(Base):
     is_approved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_blocked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     onchain_issuer_id: Mapped[str] = mapped_column(String(66), nullable=True)  # bytes32 hex id in IssuerRegistry
+    signing_public_key_pem: Mapped[str] = mapped_column(String(1024), nullable=True)  # Ed25519 verify key
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
     user: Mapped["User"] = relationship()

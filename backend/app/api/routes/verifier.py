@@ -111,20 +111,13 @@ def verify_submitted_proof(
             if credential is None or credential.status != CredentialStatus.ACTIVE:
                 result = "revoked" if credential and credential.status == CredentialStatus.REVOKED else "invalid"
             else:
-                # Validate the issuer signature of the credential and current issuer key status
-                from app.core.keystore import get_issuer_verification_key, is_issuer_key_active
+                from app.core.issuer_crypto import verify_credential_signature
+                from app.core.keystore import is_issuer_key_active
+
                 if not is_issuer_key_active(credential.issuer_id, db):
                     sig_valid = False
                 else:
-                    try:
-                        pub_key = get_issuer_verification_key(credential.issuer_id)
-                        pub_key.verify(
-                            bytes.fromhex(credential.issuer_signature),
-                            bytes.fromhex(credential.claims_commitment)
-                        )
-                        sig_valid = True
-                    except Exception:
-                        sig_valid = False
+                    sig_valid = verify_credential_signature(credential, db)
                 
                 if not sig_valid:
                     result = "invalid"

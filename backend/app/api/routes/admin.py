@@ -13,6 +13,7 @@ from app.schemas.admin import (
     ApproveIssuerRequest,
     BlockIssuerRequest,
 )
+from app.core.issuer_crypto import ensure_issuer_public_key
 from app.services.audit.logger import log_event, verify_chain
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_roles(Role.ADMIN))])
@@ -51,6 +52,7 @@ def approve_issuer(
 
     profile.is_approved = True
     profile.is_blocked = False
+    ensure_issuer_public_key(db, str(profile.user_id))
 
     log_event(
         db, actor_id=principal.user_id, action="admin.issuer_approved", resource_type="issuer_profile",

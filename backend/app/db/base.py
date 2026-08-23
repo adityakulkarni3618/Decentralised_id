@@ -179,7 +179,7 @@ class Base(metaclass=ModelMetaclass):
             return True
         if name in ("is_blocked", "mfa_enabled", "liveness_passed", "match_passed", "is_approved", "confirmed"):
             return False
-        if name in ("locked_until", "verified_at", "expires_at", "uploaded_at", "matched_at", "timestamp", "mfa_secret_encrypted", "full_name_encrypted", "organization_domain", "onchain_issuer_id", "blockchain_tx_hash", "onchain_credential_hash", "revoked_at", "revocation_reason"):
+        if name in ("locked_until", "verified_at", "expires_at", "uploaded_at", "matched_at", "timestamp", "mfa_secret_encrypted", "full_name_encrypted", "organization_domain", "onchain_issuer_id", "signing_public_key_pem", "blockchain_tx_hash", "onchain_credential_hash", "revoked_at", "revocation_reason"):
             return None
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 

@@ -170,7 +170,9 @@ async def verify_face_endpoint(
 async def liveness_check(
     request: Request,
     frames: list[UploadFile] = File(...),
+    face_match_id: uuid.UUID | None = None,
     principal: Principal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
 ):
     if len(frames) < 2 or len(frames) > 10:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Submit between 2 and 10 frames.")
@@ -178,6 +180,18 @@ async def liveness_check(
     frame_bytes = [await _read_validated_upload(f) for f in frames]
     result = assess_liveness(frame_bytes)
     del frame_bytes
+
+    if face_match_id is not None:
+        match = (
+            db.query(FaceMatchResult)
+            .filter(FaceMatchResult.id == face_match_id, FaceMatchResult.user_id == principal.user_id)
+            .first()
+        )
+        if match is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Face match record not found.")
+        match.liveness_passed = result.liveness_passed
+        match.liveness_score = result.liveness_score
+        db.commit()
 
     return LivenessCheckResponse(
         liveness_score=result.liveness_score,

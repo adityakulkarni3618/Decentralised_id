@@ -15,7 +15,7 @@ const roleHome: Record<string, string> = {
 };
 
 export default function LoginPage() {
-  const { login, verifyOtp, user } = useAuth();
+  const { login, verifyOtp } = useAuth();
   const router = useRouter();
 
   const [email, setEmail] = useState("");
@@ -25,6 +25,10 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  function goToDashboard(role: string) {
+    router.push(roleHome[role] || "/dashboard/user");
+  }
+
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -33,8 +37,8 @@ export default function LoginPage() {
       const result = await login(email, password);
       if (result.otpRequired && result.challengeToken) {
         setChallengeToken(result.challengeToken);
-      } else {
-        redirectHome();
+      } else if (result.role) {
+        goToDashboard(result.role);
       }
     } catch (err) {
       setError(extractErrorMessage(err));
@@ -50,22 +54,13 @@ export default function LoginPage() {
     setSubmitting(true);
     try {
       await verifyOtp(challengeToken, otpCode);
-      redirectHome();
+      const { data } = await (await import("@/lib/api")).apiClient.get("/auth/me");
+      goToDashboard(data.role);
     } catch (err) {
       setError(extractErrorMessage(err));
     } finally {
       setSubmitting(false);
     }
-  }
-
-  function redirectHome() {
-    // Small delay to allow context state to settle before reading `user`.
-    setTimeout(() => {
-      const infoStr = window.sessionStorage.getItem("user_info");
-      if (!infoStr) return;
-      const userInfo = JSON.parse(infoStr);
-      router.push(roleHome[userInfo.role] || "/dashboard/user");
-    }, 50);
   }
 
   return (

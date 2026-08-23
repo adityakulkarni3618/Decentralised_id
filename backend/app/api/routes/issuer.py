@@ -10,6 +10,7 @@ from app.api.deps import Principal, get_current_principal
 from app.core.config import settings
 from app.core.rate_limit import limiter
 from app.core.rbac import Role, require_roles
+from app.core.issuer_crypto import ensure_issuer_public_key, sign_commitment
 from app.core.security import encrypt_field
 from app.db.session import get_db
 from app.models.credential import Credential, CredentialClaim, CredentialStatus
@@ -37,18 +38,6 @@ def _get_active_issuer_profile(db: Session, user_id: str) -> IssuerProfile:
     return profile
 
 
-def _sign_commitment(commitment_hex: str, issuer_id: str) -> str:
-    """
-    Signs the commitment using the issuer's Ed25519 private key.
-    Returns the signature as a hex string.
-    """
-    from app.core.keystore import get_issuer_signing_key
-    private_key = get_issuer_signing_key(issuer_id)
-    commitment_bytes = bytes.fromhex(commitment_hex)
-    signature_bytes = private_key.sign(commitment_bytes)
-    return signature_bytes.hex()
-
-
 @router.post("/credentials", response_model=IssueCredentialResponse, status_code=status.HTTP_201_CREATED)
 @limiter.limit(settings.RATE_LIMIT_DEFAULT)
 def issue_credential(
@@ -58,6 +47,7 @@ def issue_credential(
     db: Session = Depends(get_db),
 ):
     issuer_profile = _get_active_issuer_profile(db, principal.user_id)
+    ensure_issuer_public_key(db, principal.user_id)
 
     holder = db.query(User).filter(User.email == payload.holder_email).first()
     if holder is None:
@@ -80,7 +70,7 @@ def issue_credential(
 
     overall_commitment = hashlib.sha256("|".join(claim_commitments).encode()).hexdigest()
     signing_key_id = f"issuer:{issuer_profile.id}"
-    signature = _sign_commitment(overall_commitment, principal.user_id)
+    signature = sign_commitment(overall_commitment, principal.user_id, db)
 
     # Encrypt the full raw claims payload as an audit-recoverable backup
     # (e.g. for issuer-initiated disputes); individual per-claim values

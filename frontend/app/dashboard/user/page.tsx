@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import Navbar from "@/components/Navbar";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import StatusBadge from "@/components/StatusBadge";
+import Link from "next/link";
+import { useAuth } from "@/context/AuthContext";
 import { apiClient, extractErrorMessage } from "@/lib/api";
 import { Wallet, KeyRound, History, Settings, Sparkles } from "lucide-react";
 
@@ -32,6 +34,7 @@ const PREDICATES_BY_TYPE: Record<string, string[]> = {
 };
 
 function UserDashboardContent() {
+  const { user, refreshSession } = useAuth();
   const [tab, setTab] = useState<"wallet" | "proof" | "consent" | "settings">("wallet");
   const [credentials, setCredentials] = useState<CredentialOut[]>([]);
   const [consents, setConsents] = useState<ConsentOut[]>([]);
@@ -43,6 +46,12 @@ function UserDashboardContent() {
   const [selectedPredicate, setSelectedPredicate] = useState("");
   const [proofResult, setProofResult] = useState<any>(null);
   const [generatingProof, setGeneratingProof] = useState(false);
+
+  const [mfaUri, setMfaUri] = useState<string | null>(null);
+  const [mfaManualKey, setMfaManualKey] = useState<string | null>(null);
+  const [mfaCode, setMfaCode] = useState("");
+  const [mfaMessage, setMfaMessage] = useState<string | null>(null);
+  const [mfaLoading, setMfaLoading] = useState(false);
 
   async function loadAll() {
     setLoading(true);
@@ -109,7 +118,14 @@ function UserDashboardContent() {
       <Navbar />
       <div className="max-w-6xl mx-auto px-6 py-10">
         <h1 className="text-2xl font-semibold text-gray-900 mb-1">Your Wallet</h1>
-        <p className="text-gray-500 mb-8">Manage your credentials, proofs, and consent — all under your control.</p>
+        <p className="text-gray-500 mb-4">Manage your credentials, proofs, and consent — all under your control.</p>
+        <Link
+          href="/dashboard/user/verify"
+          className="inline-flex items-center gap-2 text-sm text-brand-600 font-medium mb-8 hover:underline"
+        >
+          <Sparkles className="w-4 h-4" />
+          Run identity verification (document + face + liveness)
+        </Link>
 
         {error && <div className="bg-red-50 text-red-700 text-sm rounded-lg px-3 py-2 mb-6">{error}</div>}
 
@@ -294,15 +310,78 @@ function UserDashboardContent() {
             )}
 
             {tab === "settings" && (
-              <div className="card max-w-xl">
-                <h3 className="font-semibold mb-4">Security Settings</h3>
-                <p className="text-sm text-gray-500 mb-4">
-                  Multi-factor authentication and device management are configured server-side per account.
-                  Contact your platform administrator to enable MFA enrollment for your account.
-                </p>
-                <p className="text-xs text-gray-400">
-                  DID public key algorithm: <span className="font-mono">Ed25519</span>
-                </p>
+              <div className="card max-w-xl space-y-6">
+                <div>
+                  <h3 className="font-semibold mb-2">Multi-factor authentication</h3>
+                  {user?.mfaEnabled ? (
+                    <p className="text-sm text-green-700 bg-green-50 rounded-lg px-3 py-2">MFA is enabled on your account.</p>
+                  ) : (
+                    <div className="space-y-3">
+                      <p className="text-sm text-gray-500">
+                        Protect your wallet with TOTP (Google Authenticator, Authy, etc.).
+                      </p>
+                      {!mfaUri ? (
+                        <button
+                          className="btn-secondary text-sm"
+                          disabled={mfaLoading}
+                          onClick={async () => {
+                            setMfaLoading(true);
+                            setMfaMessage(null);
+                            try {
+                              const { data } = await apiClient.post("/auth/mfa/setup");
+                              setMfaUri(data.provisioning_uri);
+                              setMfaManualKey(data.manual_entry_key);
+                            } catch (err) {
+                              setMfaMessage(extractErrorMessage(err));
+                            } finally {
+                              setMfaLoading(false);
+                            }
+                          }}
+                        >
+                          {mfaLoading ? "Preparing..." : "Set up MFA"}
+                        </button>
+                      ) : (
+                        <div className="space-y-3">
+                          <p className="text-xs text-gray-500 break-all font-mono">{mfaManualKey}</p>
+                          <input
+                            className="input-field"
+                            placeholder="6-digit code"
+                            maxLength={6}
+                            value={mfaCode}
+                            onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, ""))}
+                          />
+                          <button
+                            className="btn-primary text-sm"
+                            disabled={mfaCode.length !== 6 || mfaLoading}
+                            onClick={async () => {
+                              setMfaLoading(true);
+                              setMfaMessage(null);
+                              try {
+                                await apiClient.post("/auth/mfa/enable", { otp_code: mfaCode });
+                                setMfaMessage("MFA enabled successfully.");
+                                setMfaUri(null);
+                                await refreshSession();
+                              } catch (err) {
+                                setMfaMessage(extractErrorMessage(err));
+                              } finally {
+                                setMfaLoading(false);
+                              }
+                            }}
+                          >
+                            Confirm and enable
+                          </button>
+                        </div>
+                      )}
+                      {mfaMessage && <p className="text-sm text-gray-600">{mfaMessage}</p>}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <h3 className="font-semibold mb-2">Decentralized identity</h3>
+                  <p className="text-xs text-gray-400">
+                    DID public key algorithm: <span className="font-mono">Ed25519</span>
+                  </p>
+                </div>
               </div>
             )}
           </>
